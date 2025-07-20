@@ -11,7 +11,7 @@ import (
 func TestConfig(t *testing.T) {
 	type TestCase struct {
 		Input         io.Reader
-		Expected      config
+		Expected      Config
 		ExpectedError bool
 		ExpectedPanic bool
 	}
@@ -33,7 +33,7 @@ func TestConfig(t *testing.T) {
 `),
 			ExpectedPanic: false,
 			ExpectedError: false,
-			Expected: config{
+			Expected: Config{
 				Events: []Event{"1"},
 				EventsTable: eventsTable{
 					Probabilities: []uint16{100},
