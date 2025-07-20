@@ -3,5 +3,5 @@ package mint
 type Executor interface {
 	Init()
 	Deinit()
-	Execute(event Event) // test result ..
+	Execute(event Event, tracker *Tracker) // test result ..
 }
