@@ -11,7 +11,7 @@ type Config struct {
 	Events []Event `json:"events"`
 	// If we are doing fuzz than we need events table
 	// same for the load tests
-	EventsTable eventsTable `json:"eventsTable"`
+	// EventsTable eventsTable `json:"eventsTable"`
 	// if we are doing normal tests then we need tests cases
 	// PreTest  []Event
 	// Tests    [][]Event
@@ -47,10 +47,10 @@ func ParseConfig(reader io.Reader) (Config, error) {
 		return Config{}, fmt.Errorf("events have duplicates, %s", b.String())
 	}
 
-	err = cfg.EventsTable.Validate(len(cfg.Events))
-	if err != nil {
-		return Config{}, err
-	}
+	// err = cfg.EventsTable.Validate(len(cfg.Events))
+	// if err != nil {
+	// 	return Config{}, err
+	// }
 
 	return cfg, nil
 }
