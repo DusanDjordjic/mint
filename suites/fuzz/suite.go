@@ -5,6 +5,7 @@ import (
 	"math/rand/v2"
 
 	"github.com/DusanDjordjic/mint"
+	"github.com/DusanDjordjic/mint/tracker"
 )
 
 type FuzzSuite struct {
@@ -69,11 +70,12 @@ func (suite *FuzzSuite) Run() {
 		suite.currentEvent = nextEvent
 	}
 
-	suite.executor.Init()
+	tracker := tracker.New()
+	suite.executor.Init(tracker)
 	for _, event := range test {
-		suite.executor.Execute(event)
+		suite.executor.Execute(event, tracker)
 	}
-	suite.executor.Deinit()
+	suite.executor.Deinit(tracker)
 
 }
 

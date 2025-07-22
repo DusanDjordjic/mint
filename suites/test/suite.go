@@ -1,34 +1,30 @@
 package test
 
-import "github.com/DusanDjordjic/mint"
+import (
+	"github.com/DusanDjordjic/mint"
+	"github.com/DusanDjordjic/mint/tracker"
+)
 
 type TestSuite struct {
 	test     []mint.Event
 	executor mint.Executor
-	tracker  mint.Tracker
+	tracker  *tracker.Tracker
 }
 
-func New(test []mint.Event, executor mint.Executor, tracker mint.Tracker) TestSuite {
+func New(test []mint.Event, executor mint.Executor, t *tracker.Tracker) TestSuite {
 	return TestSuite{
 		test:     test,
 		executor: executor,
-		tracker:  tracker,
+		tracker:  t,
 	}
 }
 
 func (suite *TestSuite) Run() {
-	suite.executor.Init()
-
-	// cold start.. prvom treba 14 mikro sekundi svakom sledecem 1-2 max
-	// TODO: istraziti cold start
-	suite.executor.Execute(suite.test[0], &suite.tracker)
-	suite.tracker.Reset()
-
+	suite.executor.Init(suite.tracker)
 	for _, event := range suite.test {
-		suite.tracker.EventStart(event.Name)
-		suite.executor.Execute(event, &suite.tracker)
-		suite.tracker.EventStop()
+		entry := suite.tracker.Start(event.Name)
+		suite.executor.Execute(event, suite.tracker)
+		entry.Stop()
 	}
-	suite.executor.Deinit()
-	suite.tracker.PrintReportTree()
+	suite.executor.Deinit(suite.tracker)
 }

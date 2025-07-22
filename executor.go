@@ -1,7 +1,9 @@
 package mint
 
+import "github.com/DusanDjordjic/mint/tracker"
+
 type Executor interface {
-	Init()
-	Deinit()
-	Execute(event Event, tracker *Tracker) // test result ..
+	Init(tracker *tracker.Tracker)
+	Deinit(tracker *tracker.Tracker)
+	Execute(event Event, tracker *tracker.Tracker)
 }
