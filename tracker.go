@@ -1,249 +1,298 @@
 package mint
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
-	"strings"
+	"sort"
+	"sync/atomic"
 	"time"
 )
 
-type timeEntry struct {
-	eventIndex int
-	eventName  string
-	stepName   string
-	time       time.Time
-	isStart    bool
+type contextKey int
+
+const currentStepIDKey contextKey = 0
+
+var activeStepContext = context.Background()
+
+type step struct {
+	id        int
+	parentID  int
+	eventID   int
+	name      string
+	startTime time.Time
+	duration  time.Duration
+	children  []*step
+}
+
+type TrackerEventHandle struct {
+	id      int
+	name    string
+	tracker *Tracker
+}
+
+type TrackerStepHandle struct {
+	id      int
+	name    string
+	eventID int
+	tracker *Tracker
 }
 
 type Tracker struct {
-	entries      []timeEntry
-	currentEvent int
-	eventNames   map[int]string
-	stepStack    []string
+	steps  map[int]*step
+	events map[int]string
+	nextID int64
 }
 
-type StepTiming struct {
-	fullName string
-	duration time.Duration
-	level    int
+type StepResult struct {
+	ID        int           `json:"id"`
+	ParentID  int           `json:"parentId"`
+	Name      string        `json:"name"`
+	Duration  time.Duration `json:"duration"`
+	Children  []*StepResult `json:"children"`
+	StartTime time.Time     `json:"-"`
 }
 
-type StepNode struct {
-	name     string
-	duration time.Duration
-	children []*StepNode
-	level    int
+type EventReport struct {
+	EventID       int           `json:"eventId"`
+	Name          string        `json:"eventName"`
+	TotalDuration time.Duration `json:"totalDuration"`
+	RootSteps     []*StepResult `json:"steps"`
+	StartTime     time.Time     `json:"-"`
+}
+
+type Report struct {
+	Events []*EventReport `json:"events"`
 }
 
 func NewTracker() *Tracker {
 	return &Tracker{
-		entries:      make([]timeEntry, 0, 1000),
-		currentEvent: -1,
-		eventNames:   make(map[int]string),
-		stepStack:    make([]string, 0),
+		steps:  make(map[int]*step),
+		events: make(map[int]string),
+		nextID: 1,
 	}
 }
 
-func (t *Tracker) EventStart(name string) {
-	t.currentEvent++
-	t.eventNames[t.currentEvent] = name
-	t.entries = append(t.entries, timeEntry{
-		eventIndex: t.currentEvent,
-		eventName:  name,
-		stepName:   "",
-		time:       time.Now(),
-		isStart:    true,
-	})
+func (t *Tracker) EventStart(name string) *TrackerEventHandle {
+	eventID := int(atomic.AddInt64(&t.nextID, 1))
+	t.events[eventID] = name
+	return &TrackerEventHandle{id: eventID, name: name, tracker: t}
 }
 
-func (t *Tracker) EventStop() {
-	if t.currentEvent >= 0 {
-		t.entries = append(t.entries, timeEntry{
-			eventIndex: t.currentEvent,
-			eventName:  t.eventNames[t.currentEvent],
-			stepName:   "",
-			time:       time.Now(),
-			isStart:    false,
-		})
+func (e *TrackerEventHandle) StepStart(stepName string) *TrackerStepHandle {
+	parentID := -1
+	if pID, ok := activeStepContext.Value(currentStepIDKey).(int); ok {
+		parentID = pID
+	}
+	return e.tracker.stepStart(stepName, e.id, parentID)
+}
+
+func (e *TrackerEventHandle) Step(stepName string, fn func()) {
+	step := e.StepStart(stepName)
+	defer step.Stop()
+	e.tracker.withStepContext(step.id, fn)
+}
+
+func (e *TrackerEventHandle) StepWithHandle(stepName string, fn func(*TrackerStepHandle)) {
+	step := e.StepStart(stepName)
+	defer step.Stop()
+	e.tracker.withStepContext(step.id, func() { fn(step) })
+}
+
+func (s *TrackerStepHandle) Stop() {
+	s.tracker.stepStop(s.id)
+}
+
+func (s *TrackerStepHandle) StepStart(stepName string) *TrackerStepHandle {
+	return s.tracker.stepStart(stepName, s.eventID, s.id)
+}
+
+func (s *TrackerStepHandle) Step(stepName string, fn func()) {
+	step := s.StepStart(stepName)
+	defer step.Stop()
+	s.tracker.withStepContext(step.id, fn)
+}
+
+func (s *TrackerStepHandle) StepWithHandle(stepName string, fn func(*TrackerStepHandle)) {
+	step := s.StepStart(stepName)
+	defer step.Stop()
+	s.tracker.withStepContext(step.id, func() { fn(step) })
+}
+
+func (t *Tracker) withStepContext(stepID int, fn func()) {
+	oldCtx := activeStepContext
+	activeStepContext = context.WithValue(oldCtx, currentStepIDKey, stepID)
+	defer func() { activeStepContext = oldCtx }()
+	fn()
+}
+
+func (t *Tracker) stepStart(stepName string, eventID, parentID int) *TrackerStepHandle {
+	stepID := int(atomic.AddInt64(&t.nextID, 1))
+	s := &step{
+		id:        stepID,
+		parentID:  parentID,
+		eventID:   eventID,
+		name:      stepName,
+		startTime: time.Now(),
+	}
+	t.steps[stepID] = s
+	return &TrackerStepHandle{id: stepID, name: stepName, eventID: eventID, tracker: t}
+}
+
+func (t *Tracker) stepStop(stepID int) {
+	if s := t.steps[stepID]; s != nil {
+		s.duration = time.Since(s.startTime)
 	}
 }
 
 func (t *Tracker) Reset() {
-	t.entries = t.entries[:0]
-	t.currentEvent = -1
-	t.eventNames = make(map[int]string)
-	t.stepStack = t.stepStack[:0]
+	t.steps = make(map[int]*step)
+	t.events = make(map[int]string)
+	atomic.StoreInt64(&t.nextID, 1)
 }
 
-func (t *Tracker) Step(name string, fn func()) {
-	t.StepStart(name)
-	defer t.StepStop(name)
-	fn()
-}
+func (t *Tracker) GenerateReport(eventIDs ...int) *Report {
+	eventSteps := make(map[int][]*step)
 
-func (t *Tracker) StepStart(stepName string) {
-	if t.currentEvent >= 0 {
-		fullStepName := stepName
-		if len(t.stepStack) > 0 {
-			fullStepName = strings.Join(t.stepStack, "/") + "/" + stepName
-		}
-
-		t.stepStack = append(t.stepStack, stepName)
-
-		t.entries = append(t.entries, timeEntry{
-			eventIndex: t.currentEvent,
-			eventName:  t.eventNames[t.currentEvent],
-			stepName:   fullStepName,
-			time:       time.Now(),
-			isStart:    true,
-		})
-	}
-}
-
-func (t *Tracker) StepStop(stepName string) {
-	if t.currentEvent >= 0 && len(t.stepStack) > 0 {
-		fullStepName := stepName
-		if len(t.stepStack) > 1 {
-			fullStepName = strings.Join(t.stepStack[:len(t.stepStack)-1], "/") + "/" + stepName
-		}
-
-		t.entries = append(t.entries, timeEntry{
-			eventIndex: t.currentEvent,
-			eventName:  t.eventNames[t.currentEvent],
-			stepName:   fullStepName,
-			time:       time.Now(),
-			isStart:    false,
-		})
-
-		if len(t.stepStack) > 0 {
-			t.stepStack = t.stepStack[:len(t.stepStack)-1]
-		}
-	}
-}
-
-// ukrao. builduje treeview
-// Event: Dusan
-// ├── processing (1.063554ms)
-// │   ├── println (2.81µs)
-// │   └── something (1.060214ms)
-// └── time sleep (3.17554ms)
-//     └── 123 (1.058523ms)
-// Total Duration: 4.239354ms
-
-func (t *Tracker) PrintReportTree() {
-	fmt.Println("=== Tracker Report  ===")
-	eventEntries := make(map[int][]timeEntry)
-
-	for _, entry := range t.entries {
-		eventEntries[entry.eventIndex] = append(eventEntries[entry.eventIndex], entry)
+	// Group steps by event
+	for _, s := range t.steps {
+		eventSteps[s.eventID] = append(eventSteps[s.eventID], s)
 	}
 
-	for eventIdx := 0; eventIdx <= t.currentEvent; eventIdx++ {
-		entries := eventEntries[eventIdx]
-		if len(entries) == 0 {
-			continue
+	var idsToProcess []int
+	if len(eventIDs) > 0 {
+		for _, id := range eventIDs {
+			if _, exists := eventSteps[id]; exists {
+				idsToProcess = append(idsToProcess, id)
+			}
 		}
+	} else {
+		for id := range eventSteps {
+			idsToProcess = append(idsToProcess, id)
+		}
+	}
+	sort.Ints(idsToProcess)
 
-		eventName, exists := t.eventNames[eventIdx]
-		if !exists {
+	report := &Report{Events: make([]*EventReport, 0, len(idsToProcess))}
+
+	for _, eventID := range idsToProcess {
+		steps := eventSteps[eventID]
+		eventName := t.events[eventID]
+		if eventName == "" {
 			eventName = "Unknown"
 		}
 
-		fmt.Printf("Event: %s\n", eventName)
-
+		// Calculate event bounds
 		var eventStart, eventEnd time.Time
-		stepTimings := make(map[string]time.Duration)
-		stepStarts := make(map[string]time.Time)
-
-		for _, entry := range entries {
-			if entry.stepName == "" {
-				if entry.isStart {
-					eventStart = entry.time
-				} else {
-					eventEnd = entry.time
-				}
-			} else {
-				if entry.isStart {
-					stepStarts[entry.stepName] = entry.time
-				} else {
-					startTime, exists := stepStarts[entry.stepName]
-					if exists {
-						duration := entry.time.Sub(startTime)
-						stepTimings[entry.stepName] = duration
-						delete(stepStarts, entry.stepName)
-					}
-				}
+		for _, s := range steps {
+			if eventStart.IsZero() || s.startTime.Before(eventStart) {
+				eventStart = s.startTime
+			}
+			stepEnd := s.startTime.Add(s.duration)
+			if eventEnd.IsZero() || stepEnd.After(eventEnd) {
+				eventEnd = stepEnd
 			}
 		}
 
-		root := t.buildStepTree(stepTimings)
-
-		t.printStepTree(root, "", true, true)
-
+		var totalDuration time.Duration
 		if !eventStart.IsZero() && !eventEnd.IsZero() {
-			eventDuration := eventEnd.Sub(eventStart)
-			fmt.Printf("Total Duration: %v\n", eventDuration)
+			totalDuration = eventEnd.Sub(eventStart)
 		}
-		fmt.Println()
+
+		report.Events = append(report.Events, &EventReport{
+			EventID:       eventID,
+			Name:          eventName,
+			TotalDuration: totalDuration,
+			RootSteps:     t.buildStepHierarchy(steps),
+			StartTime:     eventStart,
+		})
+	}
+
+	return report
+}
+
+func (t *Tracker) buildStepHierarchy(steps []*step) []*StepResult {
+	stepMap := make(map[int]*StepResult, len(steps))
+
+	for _, s := range steps {
+		stepMap[s.id] = &StepResult{
+			ID:        s.id,
+			ParentID:  s.parentID,
+			Name:      s.name,
+			Duration:  s.duration,
+			StartTime: s.startTime,
+			Children:  make([]*StepResult, 0),
+		}
+	}
+
+	var roots []*StepResult
+	for _, result := range stepMap {
+		if result.ParentID == -1 {
+			roots = append(roots, result)
+		} else if parent := stepMap[result.ParentID]; parent != nil {
+			parent.Children = append(parent.Children, result)
+		}
+	}
+
+	var sortSteps func([]*StepResult)
+	sortSteps = func(stepList []*StepResult) {
+		sort.Slice(stepList, func(i, j int) bool {
+			return stepList[i].StartTime.Before(stepList[j].StartTime)
+		})
+		for _, step := range stepList {
+			sortSteps(step.Children)
+		}
+	}
+	sortSteps(roots)
+
+	return roots
+}
+
+func (r *Report) ToTree() {
+	for _, event := range r.Events {
+		fmt.Printf("Event: %s\n", event.Name)
+		for i, step := range event.RootSteps {
+			r.printStep(step, "", i == len(event.RootSteps)-1)
+		}
+		fmt.Printf("Total Duration: %s\n\n", formatDuration(event.TotalDuration))
 	}
 }
 
-func (t *Tracker) buildStepTree(timings map[string]time.Duration) *StepNode {
-	root := &StepNode{name: "root", children: make([]*StepNode, 0)}
-	nodeMap := make(map[string]*StepNode)
-	nodeMap[""] = root
+func formatDuration(d time.Duration) string {
+	ns := d.Nanoseconds()
 
-	for fullPath, duration := range timings {
-		parts := strings.Split(fullPath, "/")
-
-		currentPath := ""
-		var parent *StepNode = root
-
-		for i, part := range parts {
-			if i > 0 {
-				currentPath += "/"
-			}
-			currentPath += part
-
-			node, exists := nodeMap[currentPath]
-			if !exists {
-				node = &StepNode{
-					name:     part,
-					duration: duration,
-					children: make([]*StepNode, 0),
-					level:    i,
-				}
-				nodeMap[currentPath] = node
-				parent.children = append(parent.children, node)
-			} else if i == len(parts)-1 {
-				node.duration = duration
-			}
-			parent = node
-		}
+	if ns < 1000 {
+		return fmt.Sprintf("%dns", ns)
+	} else if ns < 1000000 {
+		us := float64(ns) / 1000.0
+		return fmt.Sprintf("%.3fμs", us)
+	} else if ns < 1000000000 {
+		ms := float64(ns) / 1000000.0
+		return fmt.Sprintf("%.3fms", ms)
+	} else {
+		s := float64(ns) / 1000000000.0
+		return fmt.Sprintf("%.3fs", s)
 	}
-
-	return root
 }
 
-func (t *Tracker) printStepTree(node *StepNode, prefix string, isLast bool, isRoot bool) {
-	if !isRoot {
-		connector := "├── "
-		if isLast {
-			connector = "└── "
-		}
-
-		durationStr := fmt.Sprintf("(%v)", node.duration)
-		fmt.Printf("%s%s%s %s\n", prefix, connector, node.name, durationStr)
+func (r *Report) printStep(step *StepResult, prefix string, isLast bool) {
+	connector := "├── "
+	if isLast {
+		connector = "└── "
 	}
 
-	for i, child := range node.children {
-		childPrefix := prefix
-		if !isRoot {
-			if isLast {
-				childPrefix += "    "
-			} else {
-				childPrefix += "│   "
-			}
-		}
-		t.printStepTree(child, childPrefix, i == len(node.children)-1, false)
+	fmt.Printf("%s%s%s (%s)\n", prefix, connector, step.Name, formatDuration(step.Duration))
+
+	childPrefix := prefix + "│   "
+	if isLast {
+		childPrefix = prefix + "    "
 	}
+
+	for i, child := range step.Children {
+		r.printStep(child, childPrefix, i == len(step.Children)-1)
+	}
+}
+
+func (r *Report) ToJSON() ([]byte, error) {
+	return json.MarshalIndent(r, "", "  ")
 }

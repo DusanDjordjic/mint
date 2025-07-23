@@ -1,7 +1,7 @@
 package tests
 
 import (
-	"fmt"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -11,59 +11,58 @@ import (
 
 type Executor struct{}
 
-func (e *Executor) Init() {
-	fmt.Println("Init")
-}
+func (e *Executor) Init()   {}
+func (e *Executor) Deinit() {}
 
-func (e *Executor) Deinit() {
-	fmt.Println("Deinit")
-}
-
-func (e *Executor) Execute(event mint.Event, tracker *mint.Tracker) {
-	tracker.Step("processing", func() {
-		tracker.Step("println", func() {
-			fmt.Println("Executing...", event.Name, event.Index)
-		})
-		tracker.Step("something", func() {
+func (e *Executor) Execute(event mint.Event, trackerEventHandle *mint.TrackerEventHandle) {
+	trackerEventHandle.Step("processing", func() {
+		trackerEventHandle.Step("println", func() {
 			time.Sleep(time.Millisecond * 1)
+		})
+		trackerEventHandle.Step("something", func() {
+			time.Sleep(time.Millisecond * 2)
 		})
 	})
 
-	// ILI
-
-	tracker.StepStart("time sleep")
+	step := trackerEventHandle.StepStart("manual sleep")
 	time.Sleep(time.Millisecond * 2)
-	tracker.StepStart("123")
-	time.Sleep(time.Millisecond * 1)
-	tracker.StepStop("123")
-	tracker.StepStop("time sleep")
+	step.Stop()
 }
 
-func TestTracker(t *testing.T) {
-	events := make(mint.Events, 2)
-	e := mint.Event{
-		Name:  "Dusan",
-		Index: 0,
-	}
-	events[0] = e
-	e = mint.Event{
-		Name:  "Cone",
-		Index: 1,
-	}
-	events[1] = e
-
-	exe := &Executor{}
-	tracker := mint.NewTracker()
-
-	test := []mint.Event{
-		events[0], events[1], events[1], events[0],
-		events[0], events[1], events[1], events[0],
-		events[0], events[1], events[1], events[0],
-		events[0], events[1], events[1], events[0],
-		events[0], events[1], events[1], events[0],
-		events[0], events[1], events[1], events[0],
+func TestMintTrackerIntegration(t *testing.T) {
+	events := mint.Events{
+		{Name: "Dusan", Index: 0},
+		{Name: "Cone", Index: 1},
 	}
 
-	s := mintTestSuite.New(test, exe, *tracker)
-	s.Run()
+	executor := &Executor{}
+	testEvents := []mint.Event{
+		events[0], events[1],
+		events[0], events[1],
+	}
+
+	suite := mintTestSuite.New(testEvents, executor)
+	suite.Run()
+
+	report := suite.GetReport()
+
+	t.Run("TreePrintDoesNotPanic", func(t *testing.T) {
+		report.ToTree()
+	})
+
+	t.Run("JSONExportIsValid", func(t *testing.T) {
+		data, err := report.ToJSON()
+		if err != nil {
+			t.Fatalf("ToJSON failed: %v", err)
+		}
+
+		var decoded map[string]any
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("Unmarshal of ToJSON output failed: %v", err)
+		}
+
+		if _, ok := decoded["events"]; !ok {
+			t.Error("JSON output missing 'events' key")
+		}
+	})
 }

@@ -8,11 +8,11 @@ type TestSuite struct {
 	tracker  mint.Tracker
 }
 
-func New(test []mint.Event, executor mint.Executor, tracker mint.Tracker) TestSuite {
+func New(test []mint.Event, executor mint.Executor) TestSuite {
 	return TestSuite{
 		test:     test,
 		executor: executor,
-		tracker:  tracker,
+		tracker:  *mint.NewTracker(),
 	}
 }
 
@@ -21,14 +21,14 @@ func (suite *TestSuite) Run() {
 
 	// cold start.. prvom treba 14 mikro sekundi svakom sledecem 1-2 max
 	// TODO: istraziti cold start
-	suite.executor.Execute(suite.test[0], &suite.tracker)
-	suite.tracker.Reset()
 
 	for _, event := range suite.test {
-		suite.tracker.EventStart(event.Name)
-		suite.executor.Execute(event, &suite.tracker)
-		suite.tracker.EventStop()
+		eventTracker := suite.tracker.EventStart(event.Name)
+		suite.executor.Execute(event, eventTracker)
 	}
 	suite.executor.Deinit()
-	suite.tracker.PrintReportTree()
+}
+
+func (suite *TestSuite) GetReport() *mint.Report {
+	return suite.tracker.GenerateReport()
 }
